@@ -1,0 +1,15 @@
+{
+  "name": "fleet-commander",
+  "owner": { "name": "Fleet Commander" },
+  "metadata": {
+    "description": "Beam your Claude Code fleet to your iPhone and Apple Watch.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "fleet-commander",
+      "source": "./",
+      "description": "Streams Claude Code hook events to the Fleet Commander cloud so each session appears as a live ship in the iPhone/Watch app."
+    }
+  ]
+}

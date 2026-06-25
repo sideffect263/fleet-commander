@@ -1,0 +1,8 @@
+{
+  "name": "fleet-commander",
+  "version": "0.1.0",
+  "description": "Beam your Claude Code sessions to the Fleet Commander iPhone app — every session becomes a ship on a live space map.",
+  "author": { "name": "Fleet Commander" },
+  "homepage": "https://fleetcommander.app",
+  "keywords": ["fleet", "monitor", "telemetry", "iphone", "watch", "visualization"]
+}
