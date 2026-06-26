@@ -1,0 +1,16 @@
+{
+  "name": "@fleet-commander/plugin",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Fleet Commander Claude Code & Codex plugin — forwards coding-agent activity to your phone, plus optional remote approvals and free-text replies.",
+  "type": "module",
+  "bin": {
+    "fleet-run": "scripts/fleet-run.mjs"
+  },
+  "scripts": {
+    "fleet-run": "node scripts/fleet-run.mjs"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.0.0"
+  }
+}

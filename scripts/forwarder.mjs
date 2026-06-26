@@ -137,13 +137,9 @@ async function main() {
   reactToAuth(status)
   if (status === 401 || status === 403) return done()
 
-  // Refresh budget stats at quiet moments, throttled.
-  if ((name === 'Stop' || name === 'SessionEnd' || name === 'PostToolUse') && statsDue()) {
-    try {
-      const stats = await computeStats(USAGE_CACHE_PATH)
-      await postJson(`${cfg.baseUrl}/v1/stats`, cfg.deviceToken, stats)
-    } catch { /* stats are best-effort */ }
-  }
+  // Usage stats intentionally NOT posted: the 5h/week % was cost ÷ an arbitrary
+  // hardcoded budget (meaningless for a subscription), and there's no reliable
+  // way to measure real rate-limit consumption from a transcript. Removed.
 
   done()
 }

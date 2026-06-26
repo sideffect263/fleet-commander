@@ -45,6 +45,39 @@ it forgets the pairing on its own and goes quiet — no orphaned Mac quietly
 POSTing into the void. `/fleet-status` will also detect and clean a dead link the
 next time you run it.
 
+## Answer from your phone (`fleet-run`)
+
+Remote approvals let your phone answer a *yes/no*. `fleet-run` lets it answer a
+*question* — type any text in the iPhone/Watch app and it lands in your live
+session as if you'd typed it at the keyboard.
+
+`fleet-run` is a thin PTY wrapper around `claude`: it runs the real Claude Code
+TUI unchanged (same keys, colors, everything) and, in the background, polls the
+backend for a reply you sent from the app. When one arrives it types it into the
+session for you (text + Enter).
+
+```bash
+# instead of `claude`, run:
+node scripts/fleet-run.mjs            # any normal `claude` args pass through
+# e.g.  node scripts/fleet-run.mjs --model opus
+```
+
+How it targets the right ship: `fleet-run` generates a session UUID and launches
+`claude --session-id <uuid>`, so it knows in advance which ship the phone will
+show (`claude:<uuid>`) and polls replies for exactly that session. (If you pass
+your own `--session-id`/`--resume`/`-c`, it respects yours and skips reply
+injection.)
+
+**node-pty (optional, native).** Phone-reply injection needs a PTY, which comes
+from the native [`node-pty`](https://www.npmjs.com/package/node-pty) module. It's
+an **optional** dependency — the rest of the plugin stays install-free. If it
+isn't present, `fleet-run` prints a one-line hint and just runs `claude` normally
+(you lose only the reply injection, never Claude Code itself):
+
+```bash
+npm i node-pty     # in this plugin dir, to enable phone replies
+```
+
 ## Use it with OpenAI Codex CLI
 
 The same forwarder + approve-hook also drive **Codex CLI** — Codex's hook system
@@ -99,6 +132,7 @@ plugin/
 │   ├── forwarder.mjs        runs on every hook: POST /v1/ingest (+ /v1/stats);
 │   │                        auto-unlinks if the backend 401s a dead fleet
 │   ├── approve-hook.mjs     opt-in PreToolUse remote approval (Claude + Codex)
+│   ├── fleet-run.mjs        PTY wrapper: type a reply in the app → injected here
 │   ├── install-codex.mjs    wires the above into Codex (FLEET_AGENT=codex)
 │   ├── link.mjs             claims a pairing code, saves the device token
 │   ├── unlink.mjs           forgets the pairing (manual; forwarder also self-heals)
@@ -106,6 +140,7 @@ plugin/
 │   └── lib/
 │       ├── config.mjs       ~/.fleet-commander/config.json (+ auth-state.json)
 │       └── transcript.mjs   token usage + 5h/week cost (ported from internal)
+├── package.json            declares node-pty as an OPTIONAL dep (for fleet-run)
 └── README.md
 ```
 
@@ -126,3 +161,7 @@ The forwarder sends only: event name, session id, working-directory basename,
 tool name, a timestamp, and aggregate token counts. It does **not** send prompts,
 file contents, tool inputs/outputs, or transcripts. Stats are token/cost totals
 only. Everything is scoped to your paired account.
+
+`fleet-run` reads back only the reply text you typed in the app (over your paired
+account) and types it into the session — it never sends your terminal output,
+transcript, or full working path anywhere.
