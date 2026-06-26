@@ -1,17 +1,29 @@
 #!/usr/bin/env node
-// forwarder.mjs — wired to every Claude Code hook by hooks/hooks.json.
+// forwarder.mjs — wired to every coding-agent hook.
+//
+// Claude Code wires it via hooks/hooks.json; Codex CLI wires it via
+// codex/hooks.json (see README "Codex" section). Both agents emit the SAME
+// hook stdin shape (session_id, cwd, hook_event_name, tool_name, tool_input,
+// transcript_path) so this one script serves both.
 //
 // On each hook it: reads the event JSON on stdin, attaches the latest assistant
 // token usage from the transcript tail, and POSTs a compact envelope to the
 // cloud's /v1/ingest. On "quiet" events (Stop/SessionEnd), and no more than once
 // per throttle window, it also recomputes 5h/week stats and POSTs /v1/stats.
 //
-// Hard rules: never block Claude Code. If unpaired, offline, or slow, it exits
+// The `agent` it reports comes from FLEET_AGENT (default 'claude'); the Codex
+// install path sets FLEET_AGENT=codex. The backend validates it against
+// claude|codex|gemini|cursor|aider and uses it to skin the ship.
+//
+// Hard rules: never block the agent. If unpaired, offline, or slow, it exits
 // quietly and fast. Pure Node builtins — no npm install for the user.
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import { basename } from 'node:path'
-import { readConfig, USAGE_CACHE_PATH, STATS_THROTTLE_PATH } from './lib/config.mjs'
+import {
+  readConfig, USAGE_CACHE_PATH, STATS_THROTTLE_PATH,
+  readAuthState, writeAuthState, clearDeviceLink,
+} from './lib/config.mjs'
 import { latestAssistantUsage, computeStats } from './lib/transcript.mjs'
 
 // Absolute backstop: whatever happens, this process dies fast.
@@ -22,20 +34,53 @@ hardTimer.unref?.()
 const STATS_THROTTLE_MS = 45_000
 const FETCH_TIMEOUT_MS = 1200
 
+// How many consecutive auth rejections (401/403) from the backend before we
+// decide the fleet is dead and unlink this Mac. >1 so a single backend hiccup
+// can't drop a healthy pairing; the backend only 401s when the token genuinely
+// no longer resolves to an account, so 3 in a row is a confident "it's gone".
+const AUTH_STRIKE_LIMIT = 3
+
+// Which coding agent is this hook firing for. Claude's install path leaves it
+// unset (→ 'claude'); the Codex install path sets FLEET_AGENT=codex. Backend
+// re-validates against claude|codex|gemini|cursor|aider.
+const AGENT = process.env.FLEET_AGENT || 'claude'
+
 function done() { clearTimeout(hardTimer); process.exit(0) }
 
+// Returns the HTTP status, or 0 when the request never completed (offline /
+// timeout / DNS). 0 is "transient" — it must NOT count toward an auth strike,
+// since a flaky network is not the same as a revoked token.
 async function postJson(url, token, body) {
   const ctl = new AbortController()
   const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS)
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
       signal: ctl.signal,
     })
-  } catch { /* offline / slow — ignore, never block Claude Code */ } finally {
+    return res.status
+  } catch { /* offline / slow — ignore, never block Claude Code */ return 0 } finally {
     clearTimeout(t)
+  }
+}
+
+// React to the backend's verdict on our device token. 401/403 means the token
+// no longer resolves to an account (fleet deleted or link revoked) — count a
+// strike, and once we hit the limit, unlink so the Mac stops sending. Any 2xx
+// clears the strike count. Other statuses (transient 0, 4xx body errors, 5xx)
+// are left alone — they aren't statements about the token's validity.
+function reactToAuth(status) {
+  if (status === 401 || status === 403) {
+    const strikes = (readAuthState().strikes || 0) + 1
+    if (strikes >= AUTH_STRIKE_LIMIT) {
+      clearDeviceLink('the backend rejected this link repeatedly — the fleet was deleted or the link was revoked')
+    } else {
+      writeAuthState({ strikes })
+    }
+  } else if (status >= 200 && status < 300) {
+    if ((readAuthState().strikes || 0) !== 0) writeAuthState({ strikes: 0 })
   }
 }
 
@@ -74,16 +119,23 @@ async function main() {
   let usage = null
   try { usage = await latestAssistantUsage(hook.transcript_path || hook.transcriptPath) } catch {}
 
-  await postJson(`${cfg.baseUrl}/v1/ingest`, cfg.deviceToken, {
+  const status = await postJson(`${cfg.baseUrl}/v1/ingest`, cfg.deviceToken, {
     name,
     sessionId,
+    agent: AGENT,
     // Privacy: send only the project folder name, never the full path (which
     // would leak the username + client/project directory names to the cloud).
+    // Applies to Codex too — same A.1 basename stripping.
     cwd: hook.cwd ? basename(hook.cwd) : undefined,
     toolName: hook.tool_name || hook.toolName,
     timestamp: new Date().toISOString(),
     usage: usage || undefined,
   })
+
+  // Self-unlink when the backend says this token is dead. If that happened,
+  // the token is gone now — skip the stats post below.
+  reactToAuth(status)
+  if (status === 401 || status === 403) return done()
 
   // Refresh budget stats at quiet moments, throttled.
   if ((name === 'Stop' || name === 'SessionEnd' || name === 'PostToolUse') && statsDue()) {

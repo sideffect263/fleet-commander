@@ -6,7 +6,7 @@
 // Claims the code at the backend, then saves the returned deviceToken to
 // ~/.fleet-commander/config.json so the forwarder can start sending events.
 
-import { readConfig, writeConfig } from './lib/config.mjs'
+import { readConfig, writeConfig, writeAuthState } from './lib/config.mjs'
 
 const code = (process.argv[2] || '').trim().toUpperCase()
 if (!code) {
@@ -35,6 +35,7 @@ try {
     process.exit(1)
   }
   writeConfig({ baseUrl: cfg.baseUrl, deviceToken: data.deviceToken, accountId: data.accountId })
+  writeAuthState({ strikes: 0 }) // fresh link — clear any prior strikes / auto-unlink marker
   console.log(`✓ Paired! This Mac is now linked to your Fleet Commander phone.`)
   console.log(`  account: ${data.accountId}`)
   console.log(`  backend: ${cfg.baseUrl}`)

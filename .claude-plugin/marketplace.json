@@ -3,7 +3,7 @@
   "owner": { "name": "Fleet Commander" },
   "metadata": {
     "description": "Beam your Claude Code fleet to your iPhone and Apple Watch.",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {

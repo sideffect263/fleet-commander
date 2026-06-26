@@ -9,12 +9,16 @@
 //   3. Emit allow / deny — or, on timeout/unreachable, emit nothing (exit 0) so
 //      Claude Code falls back to its NORMAL local permission prompt.
 //
-// Decision protocol (verified against Claude Code hook docs):
+// Decision protocol (verified against BOTH Claude Code AND Codex CLI hook docs —
+// they are byte-identical for PreToolUse, so one script serves both agents):
 //   allow → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
 //   deny  → {...,"permissionDecision":"deny","permissionDecisionReason":"..."}
 //   defer → exit 0 with no stdout (normal prompt)
 //
-// NOTE: Claude Code ALLOWS a tool if the hook is killed by its `timeout`. So we
+// The `agent` reported on the approval comes from FLEET_AGENT (default 'claude';
+// the Codex install path sets FLEET_AGENT=codex) so the phone can skin/route it.
+//
+// NOTE: both agents ALLOW a tool if the hook is killed by its `timeout`. So we
 // self-time-out (SELF_TIMEOUT_MS) safely below the hook timeout and defer.
 
 import { basename } from 'node:path'
@@ -23,6 +27,10 @@ import { readConfig } from './lib/config.mjs'
 const POLL_INTERVAL_MS = 1500
 const SELF_TIMEOUT_MS = 110_000      // hooks.json sets this hook's timeout to 120s
 const FETCH_TIMEOUT_MS = 4000
+
+// 'claude' by default; Codex install path sets FLEET_AGENT=codex. Backend
+// validates against claude|codex|gemini|cursor|aider.
+const AGENT = process.env.FLEET_AGENT || 'claude'
 
 function out(obj) { process.stdout.write(JSON.stringify(obj)) }
 const allow = (reason) => out({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: reason } })
@@ -75,9 +83,10 @@ async function main() {
     method: 'POST', headers: auth,
     body: JSON.stringify({
       sessionId: hook.session_id || hook.sessionId,
+      agent: AGENT,
       toolName,
       summary: summarize(toolName, hook.tool_input || hook.toolInput),
-      cwd: hook.cwd ? basename(hook.cwd) : undefined, // basename only (privacy)
+      cwd: hook.cwd ? basename(hook.cwd) : undefined, // basename only (privacy) — Codex too
     }),
   })
   if (!created?.approvalId) process.exit(0) // backend unreachable → defer

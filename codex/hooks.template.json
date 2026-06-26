@@ -1,0 +1,15 @@
+{
+  "_comment": "Fleet Commander → Codex CLI adapter. Installed to ~/.codex/hooks.json by `node scripts/install-codex.mjs`, which replaces __FLEET_SCRIPTS__ with this plugin's absolute scripts dir. Codex and Claude Code share the same hook stdin shape and the same PreToolUse allow/deny stdout protocol, so the SAME forwarder.mjs + approve-hook.mjs serve both — only FLEET_AGENT differs. Codex `timeout` is in SECONDS (default 600), same as Claude. Codex lacks SessionEnd / Notification / PostToolUseFailure, so those rows are omitted; Stop covers turn-end stat refresh.",
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/forwarder.mjs\"", "timeout": 3 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/forwarder.mjs\"", "timeout": 3 }] }],
+    "PreToolUse":       [{ "matcher": ".*", "hooks": [
+      { "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/forwarder.mjs\"", "timeout": 3 },
+      { "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/approve-hook.mjs\"", "timeout": 120 }
+    ] }],
+    "PostToolUse":      [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/forwarder.mjs\"", "timeout": 3 }] }],
+    "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/forwarder.mjs\"", "timeout": 3 }] }],
+    "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/forwarder.mjs\"", "timeout": 3 }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "FLEET_AGENT=codex node \"__FLEET_SCRIPTS__/forwarder.mjs\"", "timeout": 3 }] }]
+  }
+}
