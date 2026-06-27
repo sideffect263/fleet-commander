@@ -17,6 +17,10 @@ export const STATS_THROTTLE_PATH = join(CONFIG_DIR, 'last-stats.json')
 // gets unlinked automatically (see forwarder.mjs). Also remembers the last
 // auto-unlink so /fleet-status can explain it.
 export const AUTH_STATE_PATH = join(CONFIG_DIR, 'auth-state.json')
+// Per-session "allow this tool for the rest of the session" grants, set when you
+// approve from the phone with scope=session. Lets the approval hook stop asking
+// for that tool in that session (kills approve-every-Bash fatigue).
+export const SESSION_ALLOWS_PATH = join(CONFIG_DIR, 'session-allows.json')
 
 // Production backend (Cloudflare Worker). A custom domain can map here later.
 const DEFAULT_BASE_URL = 'https://fleet-commander-backend.arielxx263.workers.dev'
@@ -51,6 +55,43 @@ export function writeAuthState(state) {
   try {
     mkdirSync(CONFIG_DIR, { recursive: true })
     writeFileSync(AUTH_STATE_PATH, JSON.stringify(state, null, 2))
+  } catch { /* best-effort — never block the agent */ }
+}
+
+// --- session-scoped approval grants ----------------------------------------
+// File shape: { "<sessionId>": { tools: { "<toolName>": true }, ts: <epochMs> } }
+// Pruned by age so the file stays small (a session rarely outlives a day).
+
+const SESSION_ALLOW_TTL_MS = 24 * 60 * 60 * 1000
+
+function readSessionAllows() {
+  try { return JSON.parse(readFileSync(SESSION_ALLOWS_PATH, 'utf8')) } catch { return {} }
+}
+
+/** Has this (session, tool) been approved "for the session" already? */
+export function isSessionToolAllowed(sessionId, toolName) {
+  if (!sessionId || !toolName) return false
+  const rec = readSessionAllows()[sessionId]
+  return !!(rec && rec.tools && rec.tools[toolName])
+}
+
+/** Record an "allow this tool for the rest of the session" grant (best-effort). */
+export function allowToolForSession(sessionId, toolName) {
+  if (!sessionId || !toolName) return
+  try {
+    mkdirSync(CONFIG_DIR, { recursive: true })
+    const all = readSessionAllows()
+    const now = Date.now()
+    for (const [sid, rec] of Object.entries(all)) {
+      if (!rec || (now - (rec.ts || 0)) > SESSION_ALLOW_TTL_MS) delete all[sid]
+    }
+    const rec = all[sessionId] || { tools: {}, ts: now }
+    rec.tools[toolName] = true
+    rec.ts = now
+    all[sessionId] = rec
+    const tmp = `${SESSION_ALLOWS_PATH}.tmp.${process.pid}`
+    writeFileSync(tmp, JSON.stringify(all))
+    renameSync(tmp, SESSION_ALLOWS_PATH)
   } catch { /* best-effort — never block the agent */ }
 }
 

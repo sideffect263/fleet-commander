@@ -22,7 +22,7 @@
 // self-time-out (SELF_TIMEOUT_MS) safely below the hook timeout and defer.
 
 import { basename } from 'node:path'
-import { readConfig } from './lib/config.mjs'
+import { readConfig, isSessionToolAllowed, allowToolForSession } from './lib/config.mjs'
 
 const POLL_INTERVAL_MS = 1500
 const SELF_TIMEOUT_MS = 110_000      // hooks.json sets this hook's timeout to 120s
@@ -78,11 +78,16 @@ async function main() {
   const tools = cfg.approvals?.tools || ['Bash']
   if (!toolName || !tools.includes(toolName)) process.exit(0) // not gated → defer
 
+  const sessionId = hook.session_id || hook.sessionId
+  // Scoped approvals: if you already approved this tool "for the session" from
+  // your phone, allow it straight away without paging you again.
+  if (isSessionToolAllowed(sessionId, toolName)) { allow('Allowed for this session'); process.exit(0) }
+
   const auth = { authorization: `Bearer ${cfg.deviceToken}`, 'content-type': 'application/json' }
   const created = await fetchJson(`${cfg.baseUrl}/v1/approvals`, {
     method: 'POST', headers: auth,
     body: JSON.stringify({
-      sessionId: hook.session_id || hook.sessionId,
+      sessionId,
       agent: AGENT,
       toolName,
       summary: summarize(toolName, hook.tool_input || hook.toolInput),
@@ -95,7 +100,16 @@ async function main() {
   const deadline = Date.now() + SELF_TIMEOUT_MS
   while (Date.now() < deadline) {
     const s = await fetchJson(`${cfg.baseUrl}/v1/approvals/${id}`, { headers: auth })
-    if (s?.status === 'allow') { allow('Approved from your phone'); process.exit(0) }
+    if (s?.status === 'allow') {
+      // scope=session → remember it so we stop asking for this tool this session.
+      if (s.scope === 'session') {
+        allowToolForSession(sessionId, toolName)
+        allow('Allowed for this session from your phone')
+      } else {
+        allow('Approved from your phone')
+      }
+      process.exit(0)
+    }
     if (s?.status === 'deny') { deny('Denied from your phone'); process.exit(0) }
     await sleep(POLL_INTERVAL_MS)
   }
