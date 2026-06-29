@@ -20,6 +20,10 @@ const node = process.execPath
 const PORT = 8799
 const BASE = `http://127.0.0.1:${PORT}`
 const HOME = mkdtempSync(join(tmpdir(), 'fleet-home-'))
+// This test exercises the forwarder's hook path, not the heartbeat daemon — keep it
+// from spawning a real background daemon (it would linger ~45s against the dead test
+// backend). The daemon's own rule is covered by test/heartbeat.mjs.
+process.env.FLEET_NO_DAEMON = '1'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 

@@ -21,6 +21,12 @@ export const AUTH_STATE_PATH = join(CONFIG_DIR, 'auth-state.json')
 // approve from the phone with scope=session. Lets the approval hook stop asking
 // for that tool in that session (kills approve-every-Bash fatigue).
 export const SESSION_ALLOWS_PATH = join(CONFIG_DIR, 'session-allows.json')
+// §4.C host liveness. The forwarder writes a per-session "lease" here on each hook
+// (which sessions exist + where each transcript lives); the fleet-daemon reads them
+// to decide which sessions are still alive and beats /v1/heartbeat. daemon.pid makes
+// the per-machine beat loop a singleton.
+export const SESSIONS_DIR = join(CONFIG_DIR, 'sessions')
+export const DAEMON_PID_PATH = join(CONFIG_DIR, 'daemon.pid')
 
 // Production backend (Cloudflare Worker). A custom domain can map here later.
 const DEFAULT_BASE_URL = 'https://fleet-commander-backend.arielxx263.workers.dev'

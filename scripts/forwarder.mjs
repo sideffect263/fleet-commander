@@ -18,13 +18,16 @@
 // Hard rules: never block the agent. If unpaired, offline, or slow, it exits
 // quietly and fast. Pure Node builtins — no npm install for the user.
 
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { basename } from 'node:path'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import {
   readConfig, USAGE_CACHE_PATH, STATS_THROTTLE_PATH,
-  readAuthState, writeAuthState, clearDeviceLink,
+  readAuthState, writeAuthState, clearDeviceLink, DAEMON_PID_PATH,
 } from './lib/config.mjs'
 import { latestAssistantUsage, computeStats } from './lib/transcript.mjs'
+import { writeLease, removeLease } from './lib/leases.mjs'
 
 // Absolute backstop: whatever happens, this process dies fast.
 const HARD_EXIT_MS = 2500
@@ -46,6 +49,30 @@ const AUTH_STRIKE_LIMIT = 3
 const AGENT = process.env.FLEET_AGENT || 'claude'
 
 function done() { clearTimeout(hardTimer); process.exit(0) }
+
+// §4.C host liveness ---------------------------------------------------------
+// Is the per-machine heartbeat daemon already running?
+function daemonAlive() {
+  try {
+    if (!existsSync(DAEMON_PID_PATH)) return false
+    const pid = Number(readFileSync(DAEMON_PID_PATH, 'utf8'))
+    if (!pid) return false
+    process.kill(pid, 0)
+    return true
+  } catch (e) { return e?.code === 'EPERM' }
+}
+
+// Spawn the per-machine heartbeat daemon if it isn't already running. Detached +
+// unref'd so it outlives this short-lived hook; the daemon self-singletons via the
+// pidfile, so even a spawn race converges to one daemon. Never throws.
+function ensureDaemon() {
+  if (process.env.FLEET_NO_DAEMON) return // escape hatch (tests / opt-out)
+  if (daemonAlive()) return
+  try {
+    const script = fileURLToPath(new URL('./fleet-daemon.mjs', import.meta.url))
+    spawn(process.execPath, [script], { detached: true, stdio: 'ignore' }).unref()
+  } catch { /* best-effort — liveness is a bonus, never a blocker */ }
+}
 
 // Returns the HTTP status, or 0 when the request never completed (offline /
 // timeout / DNS). 0 is "transient" — it must NOT count toward an auth strike,
@@ -140,6 +167,15 @@ async function main() {
   // Usage stats intentionally NOT posted: the 5h/week % was cost ÷ an arbitrary
   // hardcoded budget (meaningless for a subscription), and there's no reliable
   // way to measure real rate-limit consumption from a transcript. Removed.
+
+  // §4.C host liveness: keep this session's lease current + make sure the
+  // per-machine heartbeat daemon is running. Instant (one file write + a detached
+  // spawn) and best-effort — it must never delay or block the agent (3s hook budget).
+  try {
+    if (name === 'SessionEnd') removeLease(sessionId)
+    else writeLease(sessionId, { transcript: hook.transcript_path || hook.transcriptPath || '', agent: AGENT, at: Date.now() })
+    ensureDaemon()
+  } catch { /* never block the agent */ }
 
   done()
 }
