@@ -23,6 +23,7 @@
 
 import { basename } from 'node:path'
 import { readConfig, isSessionToolAllowed, allowToolForSession } from './lib/config.mjs'
+import { isDangerousCommand } from './lib/danger.mjs'
 
 const POLL_INTERVAL_MS = 1500
 const SELF_TIMEOUT_MS = 110_000      // hooks.json sets this hook's timeout to 120s
@@ -79,9 +80,21 @@ async function main() {
   if (!toolName || !tools.includes(toolName)) process.exit(0) // not gated → defer
 
   const sessionId = hook.session_id || hook.sessionId
+  const input = hook.tool_input || hook.toolInput
+
+  // Defense-in-depth (authoritative, local): an irreversible command (rm -rf,
+  // force-push, reset --hard, DROP TABLE, mkfs …) can NEVER ride a blanket "allow
+  // for the session" grant. The app hides that control for these commands, but
+  // that gate is client-side; here — where we see the real, untruncated command —
+  // we enforce it, so a forged backend response or bypassed app can't whitelist
+  // a destructive command. Dangerous commands always require explicit, per-command
+  // approval.
+  const dangerous = isDangerousCommand(toolName, input)
+
   // Scoped approvals: if you already approved this tool "for the session" from
-  // your phone, allow it straight away without paging you again.
-  if (isSessionToolAllowed(sessionId, toolName)) { allow('Allowed for this session'); process.exit(0) }
+  // your phone, allow it straight away without paging you again — UNLESS this
+  // specific command is irreversible, which always re-pages.
+  if (!dangerous && isSessionToolAllowed(sessionId, toolName)) { allow('Allowed for this session'); process.exit(0) }
 
   const auth = { authorization: `Bearer ${cfg.deviceToken}`, 'content-type': 'application/json' }
   const created = await fetchJson(`${cfg.baseUrl}/v1/approvals`, {
@@ -90,7 +103,7 @@ async function main() {
       sessionId,
       agent: AGENT,
       toolName,
-      summary: summarize(toolName, hook.tool_input || hook.toolInput),
+      summary: summarize(toolName, input),
       cwd: hook.cwd ? basename(hook.cwd) : undefined, // basename only (privacy) — Codex too
     }),
   })
@@ -101,10 +114,14 @@ async function main() {
   while (Date.now() < deadline) {
     const s = await fetchJson(`${cfg.baseUrl}/v1/approvals/${id}`, { headers: auth })
     if (s?.status === 'allow') {
-      // scope=session → remember it so we stop asking for this tool this session.
-      if (s.scope === 'session') {
+      // scope=session → remember it so we stop asking for this tool this session,
+      // but NEVER persist a session grant for an irreversible command (even if the
+      // backend says scope='session') — approve it once and keep paging next time.
+      if (s.scope === 'session' && !dangerous) {
         allowToolForSession(sessionId, toolName)
         allow('Allowed for this session from your phone')
+      } else if (s.scope === 'session' && dangerous) {
+        allow('Approved once (irreversible — not whitelisted for the session)')
       } else {
         allow('Approved from your phone')
       }
