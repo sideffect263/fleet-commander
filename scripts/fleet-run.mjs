@@ -58,6 +58,20 @@ const shipSessionId = `claude:${sessionUuid}`
 
 const cfg = readConfig()
 
+// fleet-run is the LEGACY phone-reply path: it types your phone's reply into a live
+// Claude TUI through a PTY — brittle, native-module-dependent (node-pty), Claude-only.
+// The PREFERRED path is now the `ask_human` MCP tool: dependency-free, cross-agent,
+// works headless — the agent CALLS it and blocks for your phone's answer. fleet-run
+// is kept for the niche "push an UNSOLICITED message into a running session" case.
+// Make the reply status LOUD so nobody is left guessing whether it's working.
+function banner(enabled, detail) {
+  const bar = '─'.repeat(66)
+  const head = enabled
+    ? `  📡 Phone replies ENABLED (legacy fleet-run) — ${detail}`
+    : `  ⚠️  Phone replies DISABLED — ${detail}`
+  process.stderr.write(`\n${bar}\n${head}\n     Prefer the ask_human MCP tool: the agent asks, you answer from your phone.\n${bar}\n\n`)
+}
+
 // Try to load node-pty. Missing/broken native build → graceful fallback.
 async function loadPty() {
   try {
@@ -94,11 +108,17 @@ async function fetchReply(token) {
 }
 
 async function main() {
+  if (!cfg.deviceToken) {
+    banner(false, 'this Mac isn\'t paired (run `fleet setup` / /fleet-link).')
+    return execPlain()
+  }
+  if (userManagesSession) {
+    banner(false, 'you supplied your own --session-id/--resume, so reply targeting is off.')
+    return execPlain()
+  }
   const pty = await loadPty()
   if (!pty) {
-    console.error('fleet-run: node-pty not available — running claude normally '
-      + '(phone replies disabled).\n'
-      + '            install with: npm i node-pty')
+    banner(false, 'node-pty (a native module) isn\'t installed. `npm i node-pty` to enable — or just use ask_human.')
     return execPlain()
   }
 
@@ -134,6 +154,7 @@ async function main() {
   let polling = false
   let pollTimer = null
   if (cfg.deviceToken && !userManagesSession) {
+    banner(true, `ship ${shipSessionId}`)
     polling = true
     const tick = async () => {
       if (!polling) return

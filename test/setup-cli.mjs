@@ -72,19 +72,31 @@ try {
   assert.ok(codexHooks.includes('FLEET_AGENT=codex'), 'codex hooks carry FLEET_AGENT=codex')
   ok('codex hooks point at the stable dir — STALE-PATH BUG FIXED (not the plugin dir)')
 
+  // ask_human MCP server registered in config.toml, baking the stable path.
+  const codexToml = readFileSync(join(HOME, '.codex', 'config.toml'), 'utf8')
+  assert.ok(codexToml.includes('[mcp_servers.fleet_ask_human]'), 'config.toml registers the ask_human MCP server')
+  assert.ok(codexToml.includes(join(stableDir, 'mcp-ask-human.mjs')), 'MCP args bake the STABLE mcp-ask-human path')
+  assert.ok(!codexToml.includes(join(pluginRoot, 'scripts')), 'MCP args do NOT bake the ephemeral plugin dir')
+  assert.match(codexToml, /tool_timeout_sec\s*=\s*900/, 'tool_timeout_sec raised so ask_human can block for minutes')
+  assert.ok(existsSync(join(stableDir, 'mcp-ask-human.mjs')), 'mcp-ask-human.mjs copied into the stable dir')
+  ok('codex config.toml registers ask_human MCP server (stable path, long tool timeout)')
+
   // === B. idempotent re-run (no needless /hooks re-trust) ===
   const before = readFileSync(join(HOME, '.codex', 'hooks.json'), 'utf8')
+  const beforeToml = readFileSync(join(HOME, '.codex', 'config.toml'), 'utf8')
   const r2 = await run([fleetCli, 'setup', '--agent', 'codex'], env)
   assert.strictEqual(r2.code, 0, 're-run exits 0')
   assert.match(r2.out, /Already paired/i, 're-run detects existing pairing (no duplicate claim)')
   assert.strictEqual(readFileSync(join(HOME, '.codex', 'hooks.json'), 'utf8'), before, 'hooks.json byte-identical on re-run')
-  ok('re-run is idempotent: already-paired, hooks unchanged (no /hooks churn)')
+  assert.strictEqual(readFileSync(join(HOME, '.codex', 'config.toml'), 'utf8'), beforeToml, 'config.toml byte-identical on re-run (MCP block idempotent)')
+  ok('re-run is idempotent: already-paired, hooks + config.toml unchanged (no /hooks churn)')
 
-  // === C. --remove strips our hooks ===
+  // === C. --remove strips our hooks AND the MCP block ===
   const r3 = await run([fleetCli, 'setup', '--agent', 'codex', '--remove'], env)
   assert.strictEqual(r3.code, 0, 'remove exits 0')
   assert.ok(!readFileSync(join(HOME, '.codex', 'hooks.json'), 'utf8').includes('forwarder.mjs'), 'fleet hooks gone')
-  ok('`fleet setup --agent codex --remove` strips our hooks cleanly')
+  assert.ok(!readFileSync(join(HOME, '.codex', 'config.toml'), 'utf8').includes('mcp_servers.fleet_ask_human'), 'MCP block gone from config.toml')
+  ok('`fleet setup --agent codex --remove` strips our hooks + the MCP block cleanly')
 
   // === D. cursor is honest about not-yet-available (doesn't half-wire) ===
   const r4 = await run([fleetCli, 'setup', '--agent', 'cursor', '--code', 'FLEET-XX'], env)

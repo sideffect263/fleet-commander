@@ -15,6 +15,7 @@ import {
   readFileSync, writeFileSync, mkdirSync, renameSync, copyFileSync, readdirSync, existsSync,
 } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { homedir } from 'node:os'
 import { SCRIPTS_DIR, readConfig, writeConfig, writeAuthState } from './config.mjs'
 
 export { SCRIPTS_DIR }
@@ -23,7 +24,7 @@ export { SCRIPTS_DIR }
 // hook, and the heartbeat daemon the forwarder spawns (`new URL('./fleet-daemon.mjs')`
 // resolves NEXT to the copied forwarder, so it must live alongside it). Plus the
 // optional Cursor adapter once it ships. The whole lib/ they import comes too.
-const RUNTIME_FILES = ['forwarder.mjs', 'approve-hook.mjs', 'fleet-daemon.mjs', 'cursor-adapter.mjs']
+const RUNTIME_FILES = ['forwarder.mjs', 'approve-hook.mjs', 'fleet-daemon.mjs', 'cursor-adapter.mjs', 'mcp-ask-human.mjs']
 
 /**
  * Copy the hook runtime from the plugin's scripts dir into the stable dir.
@@ -122,6 +123,64 @@ export function uninstallAgentHooks({ hooksPath }) {
   const nextStr = JSON.stringify(next, null, 2) + '\n'
   if (existingRaw === nextStr) return { changed: false }
   writeJsonAtomic(hooksPath, nextStr)
+  return { changed: true }
+}
+
+// --- Codex MCP registration (ask_human) -------------------------------------
+// Claude Code ships the ask_human MCP server via plugin.json's mcpServers (with
+// ${CLAUDE_PLUGIN_ROOT}); Codex has no plugin manifest, so we register the server
+// in ~/.codex/config.toml. config.toml is TOML (not JSON), so rather than parse it
+// we manage ONLY our own sentinel-delimited block — append it if absent, replace it
+// if present — leaving every other table untouched. Idempotent.
+
+const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml')
+const MCP_BEGIN = '# >>> fleet-commander ask_human (managed — do not edit) >>>'
+const MCP_END = '# <<< fleet-commander ask_human (managed) <<<'
+
+function codexMcpBlock(scriptsDir) {
+  const scriptPath = join(scriptsDir, 'mcp-ask-human.mjs')
+  // JSON.stringify yields a valid TOML basic string for ordinary paths (escapes
+  // backslashes/quotes). Codex enforces a per-tool timeout (default 60s); ask_human
+  // blocks for minutes, so tool_timeout_sec must comfortably exceed the MCP server's
+  // own ask timeout (10 min) — 900s gives headroom so the server times out first.
+  return [
+    MCP_BEGIN,
+    '[mcp_servers.fleet_ask_human]',
+    'command = "node"',
+    `args = [${JSON.stringify(scriptPath)}]`,
+    'env = { FLEET_AGENT = "codex" }',
+    'startup_timeout_sec = 10',
+    'tool_timeout_sec = 900',
+    MCP_END,
+  ].join('\n')
+}
+
+// Replace any existing managed block (and surrounding blank lines) — used by both
+// install (with a fresh block) and uninstall (with '').
+function spliceManaged(raw, replacement) {
+  const re = new RegExp(`\\n*${MCP_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${MCP_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n*`, 'g')
+  const stripped = raw.replace(re, '\n')
+  if (!replacement) return stripped.replace(/\n{3,}/g, '\n\n').trimEnd() + (stripped.trim() ? '\n' : '')
+  const base = stripped.trimEnd()
+  return (base ? base + '\n\n' : '') + replacement + '\n'
+}
+
+/** Register the ask_human MCP server in Codex's config.toml (idempotent). */
+export function installCodexMcp(scriptsDir = SCRIPTS_DIR) {
+  const raw = readJsonRaw(CODEX_CONFIG_PATH) || ''
+  const next = spliceManaged(raw, codexMcpBlock(scriptsDir))
+  if (raw === next) return { changed: false, configPath: CODEX_CONFIG_PATH }
+  writeJsonAtomic(CODEX_CONFIG_PATH, next)
+  return { changed: true, configPath: CODEX_CONFIG_PATH }
+}
+
+/** Remove the ask_human MCP block from Codex's config.toml. */
+export function uninstallCodexMcp() {
+  const raw = readJsonRaw(CODEX_CONFIG_PATH)
+  if (!raw) return { changed: false }
+  const next = spliceManaged(raw, '')
+  if (raw === next) return { changed: false }
+  writeJsonAtomic(CODEX_CONFIG_PATH, next)
   return { changed: true }
 }
 

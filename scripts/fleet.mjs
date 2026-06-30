@@ -19,6 +19,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   copyRuntimeScripts, SCRIPTS_DIR, installAgentHooks, uninstallAgentHooks, linkFleet,
+  installCodexMcp, uninstallCodexMcp,
 } from './lib/install-common.mjs'
 import { readConfig } from './lib/config.mjs'
 
@@ -64,9 +65,13 @@ const A = AGENTS[agent]
 
 // --- uninstall path ----------------------------------------------------------
 if (args.remove) {
-  if (agent === 'claude') { console.log('Claude Code hooks ship with the marketplace plugin — remove it with `claude plugin uninstall fleet-commander`.'); process.exit(0) }
+  if (agent === 'claude') { console.log('Claude Code hooks + the ask_human MCP server ship with the marketplace plugin — remove it with `claude plugin uninstall fleet-commander`.'); process.exit(0) }
   uninstallAgentHooks({ hooksPath: A.hooks })
   console.log(`✓ Fleet Commander ${agent} hooks removed from ${A.hooks}`)
+  if (agent === 'codex') {
+    const { changed } = uninstallCodexMcp()
+    if (changed) console.log('✓ ask_human MCP server removed from ~/.codex/config.toml')
+  }
   process.exit(0)
 }
 
@@ -88,6 +93,11 @@ if (agent === 'claude') {
   const { changed } = installAgentHooks({ hooksPath: A.hooks, templatePath: A.template, scriptsDir: SCRIPTS_DIR })
   console.log(`✓ Fleet Commander wired into ${agent} → ${A.hooks}`)
   console.log(`  runtime: ${SCRIPTS_DIR}  (stable copy — survives updates)`)
+  if (agent === 'codex') {
+    // Codex has no plugin manifest, so register the ask_human MCP server in config.toml.
+    const mcp = installCodexMcp(SCRIPTS_DIR)
+    if (mcp.changed) console.log(`✓ ask_human MCP server registered in ~/.codex/config.toml`)
+  }
   if (changed && A.trust) trustNote = A.trust
 }
 
