@@ -28,6 +28,7 @@ import {
 } from './lib/config.mjs'
 import { latestAssistantUsage, computeStats } from './lib/transcript.mjs'
 import { writeLease, removeLease } from './lib/leases.mjs'
+import { toolDetail } from './lib/detail.mjs'
 
 // Absolute backstop: whatever happens, this process dies fast.
 const HARD_EXIT_MS = 2500
@@ -146,6 +147,13 @@ async function main() {
   let usage = null
   try { usage = await latestAssistantUsage(hook.transcript_path || hook.transcriptPath) } catch {}
 
+  // A short, basename-safe descriptor of WHAT the tool is doing ("auth.ts",
+  // "npm test") — only on PreToolUse, when the tool starts. Privacy: never a full
+  // path / command / file contents — see lib/detail.mjs.
+  const detail = name === 'PreToolUse'
+    ? toolDetail(hook.tool_name || hook.toolName, hook.tool_input || hook.toolInput)
+    : undefined
+
   const status = await postJson(`${cfg.baseUrl}/v1/ingest`, cfg.deviceToken, {
     name,
     sessionId,
@@ -155,6 +163,7 @@ async function main() {
     // Applies to Codex too — same A.1 basename stripping.
     cwd: hook.cwd ? basename(hook.cwd) : undefined,
     toolName: hook.tool_name || hook.toolName,
+    detail,
     timestamp: new Date().toISOString(),
     usage: usage || undefined,
   })

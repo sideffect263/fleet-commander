@@ -27,6 +27,12 @@ export const SESSION_ALLOWS_PATH = join(CONFIG_DIR, 'session-allows.json')
 // the per-machine beat loop a singleton.
 export const SESSIONS_DIR = join(CONFIG_DIR, 'sessions')
 export const DAEMON_PID_PATH = join(CONFIG_DIR, 'daemon.pid')
+// Stable, user-owned copy of the hook runtime. Non-marketplace agents (Codex,
+// Cursor) point their hooks.json at THIS dir, never the plugin's own install dir
+// — under npx/marketplace the plugin lives in an ephemeral, content-hashed cache
+// that changes every version, which would leave the baked path dangling. `fleet
+// setup` / install-codex copy the runtime here and bake this path.
+export const SCRIPTS_DIR = join(CONFIG_DIR, 'scripts')
 
 // Production backend (Cloudflare Worker). A custom domain can map here later.
 const DEFAULT_BASE_URL = 'https://fleet-commander-backend.arielxx263.workers.dev'
