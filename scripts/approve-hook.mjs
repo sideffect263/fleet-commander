@@ -25,9 +25,26 @@ import { basename } from 'node:path'
 import { readConfig, isSessionToolAllowed, allowToolForSession } from './lib/config.mjs'
 import { isDangerousCommand } from './lib/danger.mjs'
 
-const POLL_INTERVAL_MS = 1500
-const SELF_TIMEOUT_MS = 110_000      // hooks.json sets this hook's timeout to 120s
+// Overridable for tests; defaults keep the hook safely under the 120s hook budget.
+const POLL_INTERVAL_MS = Number(process.env.FLEET_APPROVAL_POLL_MS) || 1500
+const SELF_TIMEOUT_MS = Number(process.env.FLEET_APPROVAL_TIMEOUT_MS) || 110_000  // hooks.json sets this hook's timeout to 120s
 const FETCH_TIMEOUT_MS = 4000
+
+// Tools that `acceptEdits` mode auto-accepts (file edits). Under acceptEdits these
+// run with NO local prompt, so a gated one is effectively "unattended"; other gated
+// tools (e.g. Bash) still get a local prompt under acceptEdits.
+const ACCEPT_EDITS_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
+
+// Would this gated tool proceed with NO local permission prompt to fall back to?
+// bypassPermissions (--dangerously-skip-permissions) auto-accepts everything;
+// acceptEdits only the edit tools. (Verified against the Claude Code docs: a
+// PreToolUse `deny` is still honored in bypass mode, and `permission_mode` is passed
+// in the hook stdin — so we can both DETECT this and still gate when asked to.)
+function isUnattended(mode, toolName) {
+  if (mode === 'bypassPermissions') return true
+  if (mode === 'acceptEdits' && ACCEPT_EDITS_TOOLS.has(toolName)) return true
+  return false
+}
 
 // 'claude' by default; Codex install path sets FLEET_AGENT=codex. Backend
 // validates against claude|codex|gemini|cursor|aider.
@@ -82,6 +99,19 @@ async function main() {
   const sessionId = hook.session_id || hook.sessionId
   const input = hook.tool_input || hook.toolInput
 
+  // Bypass / auto-accept sessions. In bypassPermissions there is NO local prompt to
+  // fall back to, so our normal "defer on no answer" (exit 0, below) would let the
+  // tool run anyway — meaning we'd have paged your phone for an approval we don't
+  // actually enforce, then run it regardless. That is the source of the bypass-mode
+  // push flood AND the "it ran without my approval" surprise. So by default an
+  // unattended session is OBSERVE-ONLY: no approval POST, no page. Opt back into real
+  // gating with `approvals.gateBypassSessions: true` — then a no-answer DENIES
+  // instead of deferring (a PreToolUse deny is honored even in bypass mode).
+  const permissionMode = hook.permission_mode || hook.permissionMode || 'default'
+  const unattended = isUnattended(permissionMode, toolName)
+  const gateBypass = cfg.approvals?.gateBypassSessions === true
+  if (unattended && !gateBypass) process.exit(0)
+
   // Defense-in-depth (authoritative, local): an irreversible command (rm -rf,
   // force-push, reset --hard, DROP TABLE, mkfs …) can NEVER ride a blanket "allow
   // for the session" grant. The app hides that control for these commands, but
@@ -107,7 +137,13 @@ async function main() {
       cwd: hook.cwd ? basename(hook.cwd) : undefined, // basename only (privacy) — Codex too
     }),
   })
-  if (!created?.approvalId) process.exit(0) // backend unreachable → defer
+  if (!created?.approvalId) {
+    // Backend unreachable / rejected the POST. A hard-gated unattended session has
+    // NO local prompt to fall back to, so fail CLOSED (deny) rather than let the tool
+    // run ungated; every other session defers to the normal local prompt.
+    if (unattended && gateBypass) { deny('Backend unreachable — blocked (gated unattended session)'); process.exit(0) }
+    process.exit(0) // backend unreachable → defer to the normal local prompt
+  }
 
   const id = created.approvalId
   const deadline = Date.now() + SELF_TIMEOUT_MS
@@ -130,7 +166,11 @@ async function main() {
     if (s?.status === 'deny') { deny('Denied from your phone'); process.exit(0) }
     await sleep(POLL_INTERVAL_MS)
   }
-  process.exit(0) // no decision in time → defer to the normal local prompt
+  // No decision in time. A hard-gated unattended session has NO local prompt to fall
+  // back to, so DENY it (a PreToolUse deny is honored even in bypass mode); every
+  // other session defers to Claude Code's normal local permission prompt.
+  if (unattended && gateBypass) { deny('No approval received in time — blocked (gated unattended session)'); process.exit(0) }
+  process.exit(0) // deferred → normal local prompt
 }
 
 main().catch(() => process.exit(0))

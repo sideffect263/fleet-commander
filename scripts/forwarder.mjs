@@ -164,6 +164,11 @@ async function main() {
     cwd: hook.cwd ? basename(hook.cwd) : undefined,
     toolName: hook.tool_name || hook.toolName,
     detail,
+    // The session's current permission mode (default|acceptEdits|bypassPermissions|…),
+    // passed by Claude Code in every hook. Lets the app badge sessions running
+    // UNATTENDED (auto-accept / bypass) so a session acting without prompts is visible
+    // rather than silent. Not code/content — just the mode label.
+    permissionMode: hook.permission_mode || hook.permissionMode || undefined,
     timestamp: new Date().toISOString(),
     usage: usage || undefined,
   })
