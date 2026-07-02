@@ -24,7 +24,7 @@ export { SCRIPTS_DIR }
 // hook, and the heartbeat daemon the forwarder spawns (`new URL('./fleet-daemon.mjs')`
 // resolves NEXT to the copied forwarder, so it must live alongside it). Plus the
 // optional Cursor adapter once it ships. The whole lib/ they import comes too.
-const RUNTIME_FILES = ['forwarder.mjs', 'approve-hook.mjs', 'fleet-daemon.mjs', 'cursor-adapter.mjs', 'mcp-ask-human.mjs']
+const RUNTIME_FILES = ['forwarder.mjs', 'approve-hook.mjs', 'fleet-daemon.mjs', 'cursor-adapter.mjs', 'mcp-ask-human.mjs', 'ask-human.mjs']
 
 /**
  * Copy the hook runtime from the plugin's scripts dir into the stable dir.

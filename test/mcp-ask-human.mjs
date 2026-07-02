@@ -21,10 +21,12 @@ const ok = (l) => { pass++; console.log(`  ✓ ${l}`) }
 
 console.log('\nFleet Commander plugin — ask_human MCP server + Codex registration\n')
 
-// === A. JSON-RPC stdio handshake (unpaired → tools/call is a clean isError) ===
+// === A. JSON-RPC stdio handshake (ENABLED → tools/list advertises the tool;
+//        unpaired tools/call is a clean isError). Force-enable via FLEET_ASK_HUMAN
+//        so this exercises the unchanged enabled path. ===
 {
   const HOME = mkdtempSync(join(tmpdir(), 'fc-mcp-'))
-  const child = spawn(node, [server], { env: { ...process.env, HOME, FLEET_AGENT: 'claude' }, stdio: ['pipe', 'pipe', 'ignore'] })
+  const child = spawn(node, [server], { env: { ...process.env, HOME, FLEET_AGENT: 'claude', FLEET_ASK_HUMAN: '1' }, stdio: ['pipe', 'pipe', 'ignore'] })
   let out = ''
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', (d) => (out += d))
@@ -57,6 +59,47 @@ console.log('\nFleet Commander plugin — ask_human MCP server + Codex registrat
   assert.ok(call.result.isError, 'unpaired tools/call returns isError (never hangs)')
   assert.match(call.result.content[0].text, /not paired/i, 'error explains it is not paired')
   ok('unpaired ask_human → immediate isError (loud, never hangs the agent)')
+  rmSync(HOME, { recursive: true, force: true })
+}
+
+// === A2. DISABLED (default) → tools/list advertises NO tool (0 per-turn schema
+//         tokens) and a stray tools/call returns a friendly "it's off" hint. ===
+{
+  const HOME = mkdtempSync(join(tmpdir(), 'fc-mcp-off-'))
+  // Ensure FLEET_ASK_HUMAN is NOT set for this child (default OFF).
+  const env = { ...process.env, HOME, FLEET_AGENT: 'claude' }
+  delete env.FLEET_ASK_HUMAN
+  const child = spawn(node, [server], { env, stdio: ['pipe', 'pipe', 'ignore'] })
+  let out = ''
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (d) => (out += d))
+  const send = (o) => child.stdin.write(JSON.stringify(o) + '\n')
+  send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {} } })
+  send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
+  send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'ask_human', arguments: { question: 'which env?' } } })
+
+  await new Promise((resolve) => {
+    const t = setTimeout(resolve, 5000)
+    const check = () => { if (out.includes('"id":3')) { clearTimeout(t); child.stdout.off('data', check); resolve() } }
+    child.stdout.on('data', check)
+    check()
+  })
+  child.kill()
+
+  const msgs = out.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const init = msgs.find((m) => m.id === 1)
+  assert.strictEqual(init.result.serverInfo.name, 'fleet-ask-human', 'disabled server still completes initialize (client stays happy)')
+  ok('disabled ask_human still handshakes (initialize succeeds)')
+
+  const list = msgs.find((m) => m.id === 2)
+  assert.deepStrictEqual(list.result.tools, [], 'disabled tools/list is EMPTY — 0 ask_human schema tokens per turn')
+  ok('disabled tools/list advertises no tool (removes the per-turn context tax)')
+
+  const call = msgs.find((m) => m.id === 3)
+  assert.ok(call.result.isError, 'disabled tools/call returns isError (not a silent failure)')
+  assert.match(call.result.content[0].text, /ask_human is off/i, 'off tools/call points at /fleet-ask-human on')
+  ok('disabled ask_human → friendly enable hint (never reaches the backend)')
   rmSync(HOME, { recursive: true, force: true })
 }
 

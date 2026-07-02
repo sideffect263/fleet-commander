@@ -25,9 +25,29 @@ const POLL_INTERVAL_MS = 1500
 const DEFAULT_TIMEOUT_MS = Number(process.env.FLEET_ASK_TIMEOUT_MS) || 10 * 60 * 1000
 const FETCH_TIMEOUT_MS = 5000
 const MAX_QUESTION_LEN = 4096
+// When ask_human is OFF (the default), the server advertises NO tool — so it
+// costs 0 per-turn schema tokens — and releases its resident node process after
+// this idle window. Any request re-arms the timer; enabling cancels it.
+const IDLE_EXIT_MS = 30_000
 
 const log = (...a) => { try { process.stderr.write(`[fleet-ask-human] ${a.join(' ')}\n`) } catch {} }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// --- opt-in gate ------------------------------------------------------------
+// ask_human is OFF by default (config askHuman.enabled, or FLEET_ASK_HUMAN=1).
+// Evaluated PER request (readConfig is a single JSON read) so a toggle takes
+// effect on the client's next tools/list refresh without relaunching the server.
+function askEnabled() {
+  try { return readConfig().askHuman?.enabled === true } catch { return false }
+}
+
+let idleTimer = null
+function armIdleExit() {
+  clearTimeout(idleTimer)
+  idleTimer = setTimeout(() => { log('idle & disabled — exiting to free the process'); process.exit(0) }, IDLE_EXIT_MS)
+  idleTimer.unref?.()
+}
+function cancelIdleExit() { clearTimeout(idleTimer); idleTimer = null }
 
 // --- tiny HTTP helper (builtin fetch + abort) -------------------------------
 async function http(method, url, token, body) {
@@ -151,11 +171,23 @@ async function handle(msg) {
       return // notification — no response
     case 'ping':
       return isRequest ? reply(id, {}) : undefined
-    case 'tools/list':
+    case 'tools/list': {
+      // OFF (default): advertise NO tool → 0 per-turn schema tokens, and arm the
+      // idle self-exit so the resident node process goes away for the default user.
+      if (!askEnabled()) { armIdleExit(); return reply(id, { tools: [] }) }
+      cancelIdleExit()
       return reply(id, { tools: TOOLS })
+    }
     case 'tools/call': {
       const name = params && params.name
       if (name !== 'ask_human') return replyErr(id, -32602, `unknown tool: ${name}`)
+      // OFF: never advertised the tool, but answer a stray call with a friendly hint
+      // instead of silently failing (or reaching the backend).
+      if (!askEnabled()) {
+        return reply(id, { content: [{ type: 'text', text:
+          'ask_human is off. Enable it with /fleet-ask-human on (or `fleet ask-human on`), then ask again.' }], isError: true })
+      }
+      cancelIdleExit()
       const args = (params && params.arguments) || {}
       const question = [args.question, args.context].filter(Boolean).join('\n\n')
       let res
@@ -182,4 +214,8 @@ process.stdin.on('data', (chunk) => {
   }
 })
 process.stdin.on('end', () => process.exit(0))
-log(`ready (agent=${AGENT})`)
+// Arm the idle-exit up front so a disabled server that never gets a tools/list
+// (or lists once while OFF) still releases its node process. Any request cancels
+// or re-arms it; the enabled path clears it on the first tools/list.
+if (!askEnabled()) armIdleExit()
+log(`ready (agent=${AGENT}, ask_human=${askEnabled() ? 'on' : 'off'})`)

@@ -7,9 +7,12 @@
 // transcript_path) so this one script serves both.
 //
 // On each hook it: reads the event JSON on stdin, attaches the latest assistant
-// token usage from the transcript tail, and POSTs a compact envelope to the
-// cloud's /v1/ingest. On "quiet" events (Stop/SessionEnd), and no more than once
-// per throttle window, it also recomputes 5h/week stats and POSTs /v1/stats.
+// token usage from the transcript tail, and ENQUEUES a compact envelope to a
+// durable local outbox — then returns immediately. It does NO awaited network
+// call: the already-running fleet-daemon drains the outbox to /v1/ingest on its
+// beat, so a slow/hung backend can never block the agent on a tool boundary.
+// Auth-strike reaction + self-unlink also moved to the daemon (it drains + owns
+// delivery now). See lib/outbox.mjs and fleet-daemon.mjs.
 //
 // The `agent` it reports comes from FLEET_AGENT (default 'claude'); the Codex
 // install path sets FLEET_AGENT=codex. The backend validates it against
@@ -18,31 +21,22 @@
 // Hard rules: never block the agent. If unpaired, offline, or slow, it exits
 // quietly and fast. Pure Node builtins — no npm install for the user.
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { basename } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
-  readConfig, USAGE_CACHE_PATH, STATS_THROTTLE_PATH,
-  readAuthState, writeAuthState, clearDeviceLink, DAEMON_PID_PATH,
+  readConfig, DAEMON_PID_PATH,
 } from './lib/config.mjs'
-import { latestAssistantUsage, computeStats } from './lib/transcript.mjs'
+import { latestAssistantUsage } from './lib/transcript.mjs'
 import { writeLease, removeLease } from './lib/leases.mjs'
 import { toolDetail } from './lib/detail.mjs'
+import { enqueueEvent } from './lib/outbox.mjs'
 
 // Absolute backstop: whatever happens, this process dies fast.
 const HARD_EXIT_MS = 2500
 const hardTimer = setTimeout(() => process.exit(0), HARD_EXIT_MS)
 hardTimer.unref?.()
-
-const STATS_THROTTLE_MS = 45_000
-const FETCH_TIMEOUT_MS = 1200
-
-// How many consecutive auth rejections (401/403) from the backend before we
-// decide the fleet is dead and unlink this Mac. >1 so a single backend hiccup
-// can't drop a healthy pairing; the backend only 401s when the token genuinely
-// no longer resolves to an account, so 3 in a row is a confident "it's gone".
-const AUTH_STRIKE_LIMIT = 3
 
 // Which coding agent is this hook firing for. Claude's install path leaves it
 // unset (→ 'claude'); the Codex install path sets FLEET_AGENT=codex. Backend
@@ -73,52 +67,6 @@ function ensureDaemon() {
     const script = fileURLToPath(new URL('./fleet-daemon.mjs', import.meta.url))
     spawn(process.execPath, [script], { detached: true, stdio: 'ignore' }).unref()
   } catch { /* best-effort — liveness is a bonus, never a blocker */ }
-}
-
-// Returns the HTTP status, or 0 when the request never completed (offline /
-// timeout / DNS). 0 is "transient" — it must NOT count toward an auth strike,
-// since a flaky network is not the same as a revoked token.
-async function postJson(url, token, body) {
-  const ctl = new AbortController()
-  const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS)
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-      signal: ctl.signal,
-    })
-    return res.status
-  } catch { /* offline / slow — ignore, never block Claude Code */ return 0 } finally {
-    clearTimeout(t)
-  }
-}
-
-// React to the backend's verdict on our device token. 401/403 means the token
-// no longer resolves to an account (fleet deleted or link revoked) — count a
-// strike, and once we hit the limit, unlink so the Mac stops sending. Any 2xx
-// clears the strike count. Other statuses (transient 0, 4xx body errors, 5xx)
-// are left alone — they aren't statements about the token's validity.
-function reactToAuth(status) {
-  if (status === 401 || status === 403) {
-    const strikes = (readAuthState().strikes || 0) + 1
-    if (strikes >= AUTH_STRIKE_LIMIT) {
-      clearDeviceLink('the backend rejected this link repeatedly — the fleet was deleted or the link was revoked')
-    } else {
-      writeAuthState({ strikes })
-    }
-  } else if (status >= 200 && status < 300) {
-    if ((readAuthState().strikes || 0) !== 0) writeAuthState({ strikes: 0 })
-  }
-}
-
-function statsDue() {
-  try {
-    const { at } = JSON.parse(readFileSync(STATS_THROTTLE_PATH, 'utf8'))
-    if (Date.now() - at < STATS_THROTTLE_MS) return false
-  } catch { /* no file yet → due */ }
-  try { writeFileSync(STATS_THROTTLE_PATH, JSON.stringify({ at: Date.now() })) } catch {}
-  return true
 }
 
 function readStdin() {
@@ -154,7 +102,11 @@ async function main() {
     ? toolDetail(hook.tool_name || hook.toolName, hook.tool_input || hook.toolInput)
     : undefined
 
-  const status = await postJson(`${cfg.baseUrl}/v1/ingest`, cfg.deviceToken, {
+  // Fire-and-forget: append the event to the durable local outbox and return.
+  // NO awaited network call in the hook path — the fleet-daemon drains this to
+  // /v1/ingest on its beat (and owns the 3-strike auth reaction / self-unlink).
+  // Best-effort by construction: enqueueEvent never throws.
+  enqueueEvent({
     name,
     sessionId,
     agent: AGENT,
@@ -172,15 +124,6 @@ async function main() {
     timestamp: new Date().toISOString(),
     usage: usage || undefined,
   })
-
-  // Self-unlink when the backend says this token is dead. If that happened,
-  // the token is gone now — skip the stats post below.
-  reactToAuth(status)
-  if (status === 401 || status === 403) return done()
-
-  // Usage stats intentionally NOT posted: the 5h/week % was cost ÷ an arbitrary
-  // hardcoded budget (meaningless for a subscription), and there's no reliable
-  // way to measure real rate-limit consumption from a transcript. Removed.
 
   // §4.C host liveness: keep this session's lease current + make sure the
   // per-machine heartbeat daemon is running. Instant (one file write + a detached

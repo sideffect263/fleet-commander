@@ -27,6 +27,11 @@ export const SESSION_ALLOWS_PATH = join(CONFIG_DIR, 'session-allows.json')
 // the per-machine beat loop a singleton.
 export const SESSIONS_DIR = join(CONFIG_DIR, 'sessions')
 export const DAEMON_PID_PATH = join(CONFIG_DIR, 'daemon.pid')
+// Fire-and-forget delivery queue. The forwarder APPENDS one JSON line per hook
+// event here and returns immediately (no network on the hook hot path); the
+// fleet-daemon drains it to /v1/ingest on each beat. A single append-only NDJSON
+// file (not a dir) — one fd, atomic appendFileSync, no readdir cost.
+export const OUTBOX_PATH = join(CONFIG_DIR, 'outbox.ndjson')
 // Stable, user-owned copy of the hook runtime. Non-marketplace agents (Codex,
 // Cursor) point their hooks.json at THIS dir, never the plugin's own install dir
 // — under npx/marketplace the plugin lives in an ephemeral, content-hashed cache
@@ -47,6 +52,11 @@ export function readConfig() {
     // Remote approvals are OFF by default — the approval hook is a no-op unless
     // explicitly enabled (so it never blocks normal work).
     approvals: file.approvals || { enabled: false, tools: ['Bash'] },
+    // The ask_human MCP tool is OFF by default — the MCP server advertises NO tool
+    // (0 per-turn schema tokens) and releases its node process until you opt in.
+    // FLEET_ASK_HUMAN=1 force-enables without editing config (for `fleet setup` /
+    // power users). See mcp-ask-human.mjs (gate) + ask-human.mjs (toggle CLI).
+    askHuman: { enabled: (file.askHuman && file.askHuman.enabled === true) || process.env.FLEET_ASK_HUMAN === '1' },
   }
 }
 

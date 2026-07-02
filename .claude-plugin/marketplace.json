@@ -3,7 +3,7 @@
   "owner": { "name": "Fleet Command: Agents" },
   "metadata": {
     "description": "Beam your Claude Code & Codex fleet to your iPhone and Apple Watch.",
-    "version": "0.9.0"
+    "version": "0.10.0"
   },
   "plugins": [
     {

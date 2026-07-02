@@ -20,8 +20,12 @@
 
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { readConfig, DAEMON_PID_PATH, CONFIG_DIR } from './lib/config.mjs'
+import {
+  readConfig, DAEMON_PID_PATH, CONFIG_DIR,
+  readAuthState, writeAuthState, clearDeviceLink,
+} from './lib/config.mjs'
 import { readLeases, removeLease, classifyLeases, mtimeMs } from './lib/leases.mjs'
+import { drain, outboxSize } from './lib/outbox.mjs'
 
 const INTERVAL_MS = 45_000
 const FETCH_TIMEOUT_MS = 2_000
@@ -29,6 +33,12 @@ const FETCH_TIMEOUT_MS = 2_000
 // keeps the host "alive" briefly after the last session ends, then lets the daemon
 // die so it isn't a permanent background process on an idle machine.
 const IDLE_TICKS_BEFORE_EXIT = 3
+// How many consecutive auth rejections (401/403) while DRAINING before we decide
+// the fleet is dead and unlink this Mac. >1 so a single backend hiccup can't drop a
+// healthy pairing; the backend only 401s when the token genuinely no longer resolves
+// to an account, so 3 in a row is a confident "it's gone". (Moved here from the
+// forwarder, which no longer touches the network — the daemon owns delivery now.)
+const AUTH_STRIKE_LIMIT = 3
 // The machine name the user sees on their own phone (their own host — never a path).
 const HOST = (hostname() || 'machine').replace(/\.local$/i, '').slice(0, 100)
 
@@ -70,6 +80,41 @@ async function beat(baseUrl, token, sessions) {
   } catch { /* offline / slow — the next beat tries again */ } finally { clearTimeout(t) }
 }
 
+// POST one outbox event to /v1/ingest. Returns the HTTP status, or 0 when the
+// request never completed (offline / timeout / DNS) — 0 is "transient", it must
+// NOT count as an auth strike, since a flaky network is not a revoked token.
+async function postIngest(baseUrl, token, ev) {
+  const ctl = new AbortController()
+  const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify(ev),
+      signal: ctl.signal,
+    })
+    return res.status
+  } catch { return 0 } finally { clearTimeout(t) }
+}
+
+// React to the backend's verdict on our device token while draining. 401/403 means
+// the token no longer resolves to an account (fleet deleted or link revoked) — count
+// a strike, and once we hit the limit, unlink so the Mac stops sending. Any 2xx
+// clears the strike count. Other statuses (transient 0, 4xx body errors, 5xx) are
+// left alone — they aren't statements about the token's validity.
+function reactToAuth(status) {
+  if (status === 401 || status === 403) {
+    const strikes = (readAuthState().strikes || 0) + 1
+    if (strikes >= AUTH_STRIKE_LIMIT) {
+      clearDeviceLink('the backend rejected this link repeatedly — the fleet was deleted or the link was revoked')
+    } else {
+      writeAuthState({ strikes })
+    }
+  } else if (status >= 200 && status < 300) {
+    if ((readAuthState().strikes || 0) !== 0) writeAuthState({ strikes: 0 })
+  }
+}
+
 let emptyTicks = 0
 let stopped = false
 
@@ -85,8 +130,19 @@ async function tick() {
   // Always beat the HOST (machine is alive), with whatever sessions are live.
   await beat(cfg.baseUrl, cfg.deviceToken, live)
 
+  // Drain the fire-and-forget outbox the forwarder appends to on every hook.
+  // This is where the /v1/ingest POST now happens (off the agent's hot path).
+  // reactToAuth threads the last drain status into the 3-strike auto-unlink;
+  // if that unlinks us, the next tick's readConfig() has no token and we stop.
+  try {
+    const { lastStatus } = await drain((ev) => postIngest(cfg.baseUrl, cfg.deviceToken, ev))
+    reactToAuth(lastStatus)
+  } catch { /* delivery is best-effort — the next beat retries the remainder */ }
+
+  // Never exit while events are still queued: extend the idle guard so the
+  // daemon stays alive to drain the outbox even after the last session ends.
   if (live.length === 0) {
-    if (++emptyTicks >= IDLE_TICKS_BEFORE_EXIT && readLeases().length === 0) {
+    if (++emptyTicks >= IDLE_TICKS_BEFORE_EXIT && readLeases().length === 0 && outboxSize() === 0) {
       stopped = true; cleanup(); process.exit(0)
     }
   } else {

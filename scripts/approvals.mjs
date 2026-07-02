@@ -22,6 +22,7 @@ writeConfig({
   deviceToken: cfg.deviceToken,
   accountId: cfg.accountId,
   approvals: { enabled: arg === 'on', tools },
+  askHuman: cfg.askHuman, // preserve the other toggle — never drop it on a flip
 })
 
 console.log(`✓ Remote approvals ${arg === 'on' ? 'ENABLED' : 'disabled'}.`)
